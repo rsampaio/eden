@@ -25,15 +25,15 @@ func (c CredentialsOpts) Execute(_ []string) (err error) {
 		return fmt.Errorf("credentials --instance '%s' was not found", instanceNameOrID)
 	}
 	if len(inst.Bindings) > 0 {
-		binding := inst.Bindings[0]
-
-		// convert binding.Credentials into nested map[string]map[string]interface{}
-		credentialsJSON, err := binding.CredentialsJSON()
-		if err != nil {
-			return err
-		}
-		if err := c.displayBinding(credentialsJSON, c.Attribute); err != nil {
-			return err
+		for i := 0; i < len(inst.Bindings); i++ {
+			binding := inst.Bindings[i]
+			credentialsJSON, err := binding.CredentialsJSON()
+			if err != nil {
+				return err
+			}
+			if err := c.displayBinding(credentialsJSON, c.Attribute); err != nil {
+				return err
+			}
 		}
 	} else {
 		fmt.Println("No bindings.")

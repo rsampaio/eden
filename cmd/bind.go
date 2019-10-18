@@ -39,6 +39,7 @@ func (c BindOpts) Execute(_ []string) (err error) {
 	if err != nil {
 		return errwrap.Wrapf("Failed to bind to service instance {{err}}", err)
 	}
+
 	err = Opts.config().BindServiceInstance(instance.ID, bindingID, bindingName, bindingResp.Credentials)
 	if err != nil {
 		return errwrap.Wrapf("Failed to store binding {{err}}", err)

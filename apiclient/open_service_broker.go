@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/hashicorp/errwrap"
 	"github.com/pivotal-cf/brokerapi"
@@ -103,11 +105,7 @@ func (broker *OpenServiceBroker) Provision(serviceID, planID, instanceID string)
 	if err != nil {
 		return nil, false, errwrap.Wrapf("Failed unmarshalling provisioning response: {{err}}", err)
 	}
-	if resp.StatusCode == http.StatusAccepted {
-		isAsync = true
-	} else if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
-		isAsync = false
-	}
+
 	if resp.StatusCode >= 400 {
 		errorResp := &brokerapi.ErrorResponse{}
 		json.Unmarshal(resBody, errorResp)
@@ -119,7 +117,7 @@ func (broker *OpenServiceBroker) Provision(serviceID, planID, instanceID string)
 // Bind requests new set of credentials to access service instance
 func (broker *OpenServiceBroker) Bind(serviceID, planID, instanceID, bindingID string) (binding *brokerapi.Binding, err error) {
 	someParameters, _ := json.Marshal(map[string]string{"bind1": "123", "bind2": "abc"})
-	url := fmt.Sprintf("%s/v2/service_instances/%s/service_bindings/%s", broker.url, instanceID, bindingID)
+	url := fmt.Sprintf("%s/v2/service_instances/%s/service_bindings/%s?accepts_incomplete=true", broker.url, instanceID, bindingID)
 	details := brokerapi.BindDetails{
 		ServiceID:     serviceID,
 		PlanID:        planID,
@@ -157,11 +155,66 @@ func (broker *OpenServiceBroker) Bind(serviceID, planID, instanceID, bindingID s
 	}
 
 	binding = &brokerapi.Binding{}
+
+	// Check last operation until it is success
+	if checkIfAsync(resp) {
+		fmt.Println("provision:   in-progress")
+		// TODO: don't pollute brokerapi back into this level
+		lastOpResp := &brokerapi.LastOperationResponse{State: brokerapi.InProgress}
+		for lastOpResp.State == brokerapi.InProgress {
+			time.Sleep(5 * time.Second)
+			lastOpResp, err = broker.BindLastOperation(instanceID, bindingID, "")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err.Error())
+				os.Exit(1)
+			}
+			fmt.Printf("provision:   %s - %s\n", lastOpResp.State, lastOpResp.Description)
+		}
+
+		binding, err = broker.BindFetch(instanceID, bindingID)
+		if err != nil {
+			return nil, errwrap.Wrapf("Failed fetching credential: {{err}}", err)
+		}
+	} else {
+		err = json.Unmarshal(resBody, binding)
+		if err != nil {
+			return nil, errwrap.Wrapf("Failed unmarshalling binding response: {{err}}", err)
+		}
+	}
+
+	return
+}
+
+// BindFetch fetches the content of a service binding instance
+func (broker *OpenServiceBroker) BindFetch(instanceID, bindingID string) (*brokerapi.Binding, error) {
+	url := fmt.Sprintf("%s/v2/service_instances/%s/service_bindings/%s?accepts_incomplete=true", broker.url, instanceID, bindingID)
+	binding := &brokerapi.Binding{}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, errwrap.Wrapf("Cannot construct HTTP request: {{err}}", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Broker-Api-Version", broker.apiVersion)
+	req.SetBasicAuth(broker.username, broker.password)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errwrap.Wrapf("Failed doing HTTP request: {{err}}", err)
+	}
+
+	resBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errwrap.Wrapf("Failed reading HTTP response body: {{err}}", err)
+	}
+
 	err = json.Unmarshal(resBody, binding)
 	if err != nil {
 		return nil, errwrap.Wrapf("Failed unmarshalling binding response: {{err}}", err)
 	}
-	return
+
+	return binding, nil
 }
 
 // Unbind destroys a set of credentials to access the service instance
@@ -239,6 +292,46 @@ func (broker *OpenServiceBroker) Deprovision(serviceID, planID, instanceID strin
 	return
 }
 
+// BindLastOperation fetches the status of the last operation perform upon a service instance
+func (broker *OpenServiceBroker) BindLastOperation(instanceID, bindingID, operation string) (lastOpResp *brokerapi.LastOperationResponse, err error) {
+	url := fmt.Sprintf("%s/v2/service_instances/%s/service_bindings/%s/last_operation?operation=%s&accepts_incomplete=true", broker.url, instanceID, bindingID, operation)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, errwrap.Wrapf("Cannot construct HTTP request: {{err}}", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Broker-Api-Version", broker.apiVersion)
+	req.SetBasicAuth(broker.username, broker.password)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errwrap.Wrapf("Failed doing HTTP request: {{err}}", err)
+	}
+	defer resp.Body.Close()
+
+	resBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errwrap.Wrapf("Failed reading HTTP response body: {{err}}", err)
+	}
+	if resp.StatusCode >= 400 {
+		errorResp := &brokerapi.ErrorResponse{}
+		json.Unmarshal(resBody, errorResp)
+		return nil, fmt.Errorf("API request error %d: %v", resp.StatusCode, errorResp)
+	}
+
+	lastOpResp = &brokerapi.LastOperationResponse{}
+	err = json.Unmarshal(resBody, lastOpResp)
+	if err != nil {
+		lastOpResp.Description = fmt.Sprintf("Failed to unmarshal last operation response, assuming it has succeeded: %s\n", err)
+		lastOpResp.State = brokerapi.Succeeded
+		err = nil
+	}
+
+	return
+}
+
 // LastOperation fetches the status of the last operation perform upon a service instance
 func (broker *OpenServiceBroker) LastOperation(serviceID, planID, instanceID, operation string) (lastOpResp *brokerapi.LastOperationResponse, err error) {
 	url := fmt.Sprintf("%s/v2/service_instances/%s/last_operation?operation=%s&service_id=%s&plan_id=%s", broker.url, instanceID, operation, serviceID, planID)
@@ -306,4 +399,12 @@ func (broker *OpenServiceBroker) FindPlanByNameOrID(service *brokerapi.Service, 
 		}
 	}
 	return nil, fmt.Errorf("No plan has name or ID '%s' within service '%s'", nameOrID, service.Name)
+}
+
+func checkIfAsync(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusAccepted {
+		return true
+	}
+
+	return false
 }
