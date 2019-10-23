@@ -219,7 +219,7 @@ func (broker *OpenServiceBroker) BindFetch(instanceID, bindingID string) (*broke
 
 // Unbind destroys a set of credentials to access the service instance
 func (broker *OpenServiceBroker) Unbind(serviceID, planID, instanceID, bindingID string) (err error) {
-	url := fmt.Sprintf("%s/v2/service_instances/%s/service_bindings/%s?service_id=%s&plan_id=%s",
+	url := fmt.Sprintf("%s/v2/service_instances/%s/service_bindings/%s?accepts_incomplete=true&service_id=%s&plan_id=%s",
 		broker.url, instanceID, bindingID, serviceID, planID)
 
 	req, err := http.NewRequest("DELETE", url, nil)
